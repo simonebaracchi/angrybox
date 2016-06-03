@@ -347,9 +347,9 @@ const int8_t beep_wav[] PROGMEM = {
   0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80,
   0x80, 0x7f, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80,
   0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x81,
-  //0x80, 0x80, 0x81, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x81, 0x80, 0x80,
-  //0x80, 0x80, 0x81, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80,
-  //0x81, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80,
+  0x80, 0x80, 0x81, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x81, 0x80, 0x80,
+  0x80, 0x80, 0x81, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80,
+  0x81, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80,
   //0x80, 0x80, 0x80, 0x80, 0x80, 0x81, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80,
   //0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80,
   //0x80, 0x80, 0x80, 0x80, 0x7f, 0x80, 0x80, 0x7f, 0x80, 0x80, 0x80, 0x80,
@@ -362,19 +362,36 @@ const int8_t beep_wav[] PROGMEM = {
   //0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80,
   //0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x81, 0x80, 0x80, 0x80, 0x80
 };
-#define MAX_WAV_LEN sizeof(beep_wav) / sizeof(int8_t)
-#define MIN_WAV_LEN 1600
+#define MAX_WAV_LEN         sizeof(beep_wav) / sizeof(int8_t)
+#define MIN_WAV_LEN         1750
+#define STEP_WAV_LEN        225
 unsigned int beep_wav_len = MAX_WAV_LEN;
-unsigned int p = 0;
-char    one_more_time = 0;
+unsigned int p =            0;
+char    one_more_time =     0;
+#define DEBOUNCE_INTERVAL   800  // 0.1 of a second between button presses
+unsigned int last_press =   0;
+char    speedup =           0;
+#define STARTING_SPEED      124
 
 // Pins
 #define buttonPin PCINT0
-#define outPin 4
+#define outPin 4            // signal pin
+#define powerPin 2          // turn on amplifier circuit
 
 // Helper macros
 #define adc_disable() (ADCSRA &= ~(1<<ADEN)) // disable ADC (before power-off)
 #define adc_enable()  (ADCSRA |=  (1<<ADEN)) // re-enable ADC
+
+// fast log2 for numbers up to 255
+#define fastlog2(x)   (x & 0x80 ? 7 : \
+                      (x & 0x40 ? 6 : \
+                      (x & 0x20 ? 5 : \
+                      (x & 0x10 ? 4 : \
+                      (x & 0x08 ? 3 : \
+                      (x & 0x04 ? 2 : \
+                      (x & 0x02 ? 1 : \
+                      0)))))))
+
 
 int main() {
   adc_disable();
@@ -382,6 +399,8 @@ int main() {
 
   // Enable player
   DDRB |= (1 << outPin); // enable as output
+  DDRB |= (1 << powerPin); // enable as output
+  PORTB &= ~(1 << powerPin); // turn off amplifier
   startPlaying();
 
   // Enable pin change interrupts
@@ -394,9 +413,6 @@ int main() {
   while (1);
   return 0;
 }
-
-//void loop() {
-//}
 
 void startPlaying()
 {
@@ -415,9 +431,11 @@ void startPlaying()
 #else
   TCCR0B = 1 << WGM02 | 1 << CS00;        // 1:1 prescale
 #endif
-  OCR0A = 124;                            // Divide by 1000
+  OCR0A = STARTING_SPEED;                 // Divide by 1000
 
   TIMSK = 1 << OCIE0A;                    // Enable compare match
+  
+  PORTB |= (1 << powerPin);               // turn on amplifier
 }
 
 void stopPlaying()
@@ -429,6 +447,10 @@ void stopPlaying()
   TCCR0A = 0;
   GTCCR = 0;
   TCCR1 = 0;
+  p = 0;
+  last_press = 0;
+  speedup = 0;
+  PORTB &= ~(1 << powerPin); // turn off amplifier
 }
 
 void sleep()
@@ -446,7 +468,7 @@ void sleep()
   //DDRB |= (1 << outPin); // enable as output
 }
 
-// Sample interrupt
+// Play sample interrupt
 ISR(TIMER0_COMPA_vect) {
   char sample = pgm_read_byte(&beep_wav[p++]);
   OCR1A = sample; OCR1B = sample ^ 255;
@@ -471,14 +493,17 @@ ISR(PCINT0_vect)
       beep_wav_len = MAX_WAV_LEN;
       startPlaying();
     } else {
+      if(p >= last_press && p < last_press + DEBOUNCE_INTERVAL)
+        return; // debounce
+      last_press = p;
       // if button is pushed while still playing, make another turn
       one_more_time++;
-      // make it slightly faster
-      if (p > MIN_WAV_LEN)
-        // about 4000 samples total ... take out a small bit
-        beep_wav_len -= 400;
+      // make it slightly faster by taking out a small bit of sample
+      beep_wav_len = max(MIN_WAV_LEN, beep_wav_len - STEP_WAV_LEN);
+      if(speedup < 255)
+        speedup ++;
+      OCR0A = STARTING_SPEED - fastlog2(speedup);
     }
-
   }
 }
 
